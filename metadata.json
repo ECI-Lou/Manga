@@ -1,0 +1,5 @@
+{
+  "name": "Manga Attribution Assistant",
+  "description": "An AI-powered assistant that identifies speakers and transcribes dialogue from manga pages based on a configurable cast list.",
+  "requestFramePermissions": []
+}
