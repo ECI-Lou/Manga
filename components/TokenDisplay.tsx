@@ -14,8 +14,8 @@ const TokenDisplay: React.FC<TokenDisplayProps> = ({ usage }) => {
 
   return (
     <div className="mt-4 p-3 bg-indigo-50 border border-indigo-100 rounded-lg text-xs text-indigo-800 flex justify-around">
-      <div><span className="font-bold">Input:</span> {usage.promptTokenCount}</div>
-      <div><span className="font-bold">Output:</span> {usage.candidatesTokenCount}</div>
+      <div><span className="font-bold">Input:</span> {usage.promptTokenCount} </div>
+      <div><span className="font-bold">Output:</span> {usage.candidatesTokenCount} </div>
       <div><span className="font-bold">Total:</span> {usage.totalTokenCount}</div>
     </div>
   );
