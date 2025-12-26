@@ -4,7 +4,8 @@ import { CastMember, AnalysisResult, DialogueLine } from "../types";
 
 export const analyzeMangaPages = async (
   images: string[], // Base64 strings
-  cast: CastMember[]
+  cast: CastMember[],
+  modelName: string = 'gemini-3-flash-preview'
 ): Promise<AnalysisResult> => {
   // Always use {apiKey: process.env.API_KEY} for initialization
   const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
@@ -33,54 +34,58 @@ Strict rules:
 
   const imageParts = images.map(img => ({
     inlineData: {
-      mimeType: 'image/png', // Assume PNG or similar compatible
-      data: img.split(',')[1] || img // Strip data URL prefix if present
+      mimeType: 'image/png',
+      data: img.split(',')[1] || img
     }
   }));
 
-  // Upgraded to gemini-3-pro-preview for complex OCR and character attribution reasoning
-  const response = await ai.models.generateContent({
-    model: 'gemini-3-pro-preview',
-    contents: {
-      parts: [
-        { text: prompt },
-        ...imageParts
-      ]
-    },
-    config: {
-      systemInstruction: systemInstruction,
-      responseMimeType: "application/json",
-      responseSchema: {
-        type: Type.ARRAY,
-        items: {
-          type: Type.OBJECT,
-          properties: {
-            role: { type: Type.STRING },
-            dialogue: { type: Type.STRING }
-          },
-          required: ['role', 'dialogue']
+  try {
+    const response = await ai.models.generateContent({
+      model: modelName,
+      contents: {
+        parts: [
+          { text: prompt },
+          ...imageParts
+        ]
+      },
+      config: {
+        systemInstruction: systemInstruction,
+        responseMimeType: "application/json",
+        responseSchema: {
+          type: Type.ARRAY,
+          items: {
+            type: Type.OBJECT,
+            properties: {
+              role: { type: Type.STRING },
+              dialogue: { type: Type.STRING }
+            },
+            required: ['role', 'dialogue']
+          }
         }
       }
-    }
-  });
+    });
 
-  // Extract generated text directly from response.text property
-  const rawText = response.text;
-  const lines: DialogueLine[] = JSON.parse(rawText || "[]");
-  
-  // Extract token usage from usageMetadata property
-  const usage = response.usageMetadata || {
-    promptTokenCount: 0,
-    candidatesTokenCount: 0,
-    totalTokenCount: 0
-  };
+    const rawText = response.text;
+    if (!rawText) throw new Error("Empty response from model");
+    
+    const lines: DialogueLine[] = JSON.parse(rawText);
+    
+    const usage = response.usageMetadata || {
+      promptTokenCount: 0,
+      candidatesTokenCount: 0,
+      totalTokenCount: 0
+    };
 
-  return {
-    lines,
-    usage: {
-      promptTokenCount: usage.promptTokenCount,
-      candidatesTokenCount: usage.candidatesTokenCount,
-      totalTokenCount: usage.totalTokenCount
-    }
-  };
+    return {
+      lines,
+      usage: {
+        promptTokenCount: usage.promptTokenCount,
+        candidatesTokenCount: usage.candidatesTokenCount,
+        totalTokenCount: usage.totalTokenCount
+      }
+    };
+  } catch (error: any) {
+    console.error("Gemini API Error:", error);
+    throw error;
+  }
 };
