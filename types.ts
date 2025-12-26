@@ -17,6 +17,7 @@ export interface AnalysisResult {
     candidatesTokenCount: number;
     totalTokenCount: number;
   };
+  executionTimeMs?: number;
 }
 
 export type LLMProvider = 'google' | 'custom';

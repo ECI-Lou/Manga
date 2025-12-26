@@ -22,7 +22,14 @@ const App: React.FC = () => {
   const [images, setImages] = useState<string[]>([]);
   const [result, setResult] = useState<AnalysisResult | null>(null);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
-  const [logs, setLogs] = useState<LogEntry[]>([]);
+  
+  // Initialize with system ready message to ensure console isn't empty on load
+  const [logs, setLogs] = useState<LogEntry[]>([{
+    id: 'init',
+    timestamp: new Date().toLocaleTimeString(),
+    type: 'info',
+    message: "System initialized. Ready to process manga pages."
+  }]);
   
   // Model Configuration State
   const [llmSettings, setLlmSettings] = useState<LLMSettings>({
@@ -44,11 +51,6 @@ const App: React.FC = () => {
     };
     setLogs(prev => [entry, ...prev].slice(100));
   }, []);
-
-  // Initial Log
-  useEffect(() => {
-    addLog("System initialized. Ready to process manga pages.", "info");
-  }, [addLog]);
 
   const handleProviderChange = (e: React.ChangeEvent<HTMLSelectElement>) => {
     const val = e.target.value;
@@ -148,10 +150,19 @@ const App: React.FC = () => {
     
     addLog(`Initiating request to ${llmSettings.modelId}...`, 'info');
 
+    const startTime = performance.now();
+
     try {
       const data = await analyzeMangaPages(images, cast, llmSettings);
-      setResult(data);
-      addLog(`Success! Used ${data.usage.totalTokenCount} tokens.`, 'success');
+      const endTime = performance.now();
+      const duration = endTime - startTime;
+
+      setResult({
+        ...data,
+        executionTimeMs: duration
+      });
+
+      addLog(`Success! Used ${data.usage.totalTokenCount} tokens in ${(duration/1000).toFixed(2)}s.`, 'success');
     } catch (err: any) {
       if (err.name === 'AbortError' || err.message?.includes('abort')) {
         // Logged already by stopAnalysis
@@ -368,7 +379,7 @@ const App: React.FC = () => {
           <div className="bg-white p-6 rounded-2xl shadow-sm border border-gray-200 flex-1 flex flex-col relative overflow-hidden">
             <div className="flex justify-between items-center mb-6 shrink-0">
               <h2 className="text-xl font-black text-gray-800">Transcription Result</h2>
-              <TokenDisplay usage={result?.usage || null} />
+              <TokenDisplay usage={result?.usage || null} time={result?.executionTimeMs} />
             </div>
 
             {errorState && (
