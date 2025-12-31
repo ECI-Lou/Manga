@@ -12,20 +12,78 @@ export const analyzeMangaPages = async (
   
   const systemInstruction = `
 You are a manga dialogue attribution assistant.
-Given one or more manga page images and a fixed cast description, you must:
-1) Identify which character is speaking for each dialogue balloon/text box based ONLY on visual evidence.
-2) Transcribe the exact text from the image for each balloon/text box.
-3) Output each line as: "Role: Dialogue" (one line per balloon/text box), in reading order.
 
-Cast:
+Cast Reference:
 ${castDescription}
 
-Strict rules:
-- Use ONLY the provided cast names or "UNKNOWN" if unsure.
-- Do NOT rewrite or correct dialogue.
-- Follow Japanese manga reading order (right-to-left, top-to-bottom).
-- Use "SFX" for sound effects if included.
-- Return the result as a raw JSON array of objects with 'role' and 'dialogue' properties. Do not wrap in markdown code blocks.
+Task:
+Extract ONLY dialogue balloons and narration/caption text from a manga page image.
+For each balloon/box, transcribe the text and output a normalized bounding box in [0..1000].
+Identify the speaker (role) using the Cast Reference.
+
+CRITICAL: bbox1000 MUST be normalized from ORIGINAL PIXEL coordinates of the INPUT IMAGE.
+
+Normalization definition (MANDATORY):
+- Let the original image size be W x H (the real pixel size of the input file).
+- First, determine the tight pixel bbox around TEXT GLYPHS ONLY:
+  pixel_bbox = (x1_px, y1_px, x2_px, y2_px) in the original image coordinate system.
+- Then compute bbox1000 EXACTLY as:
+  xmin = round(1000 * x1_px / W)
+  xmax = round(1000 * x2_px / W)
+  ymin = round(1000 * y1_px / H)
+  ymax = round(1000 * y2_px / H)
+- Output bbox1000 = [ymin, xmin, ymax, xmax] (integers 0..1000).
+
+DO NOT:
+- Do NOT normalize to any resized resolution (e.g., 1024, 768) or any padded/letterboxed canvas.
+- Do NOT include padding margins in bbox1000.
+- Do NOT use panel-level bounds; each bbox must be tight to its own balloon/box text.
+
+Tightness rule (MANDATORY):
+- bbox1000 must tightly enclose the text glyphs of THAT single balloon/box only.
+- It must NOT be expanded to include the balloon outline, the panel border, or nearby balloons.
+- If you are tempted to reuse the same ymin/ymax across multiple items, STOP and recompute per balloon.
+Merge ONLY within the SAME balloon/box boundary.
+Never merge two separate balloons even if they are close or in the same panel.
+
+Balloon merging rule (MANDATORY):
+- One speech balloon / one narration box = ONE record.
+- If a balloon/box contains multiple separated text groups, MERGE into ONE record:
+  - originalText contains all text in natural reading order within that balloon/box.
+
+Inclusion / exclusion:
+- Include: speech balloon text, narration/caption boxes, off-balloon dialogue that is part of narration/dialogue.
+- Exclude: SFX/onomatopoeia, signage, page numbers, watermarks, UI overlays.
+
+Transcription rules:
+- Preserve original language exactly and punctuation/symbols.
+- Preserve line breaks as displayed using "\\n".
+- Do NOT translate.
+
+Reading order & id:
+- Output in Japanese manga reading order:
+  1) top-to-bottom (smaller ymin first)
+  2) within the same row/band, right-to-left (larger xmax first)
+- Assign id starting from 1 after sorting.
+
+Attribution (Role):
+- Identify the speaker for each balloon based on visual evidence and the Cast Reference.
+- Use ONLY the provided cast names. 
+- Use "UNKNOWN" if the speaker is not in the cast list or cannot be determined.
+- Use "NARRATION" for narration boxes.
+
+Output format (STRICT):
+- Return JSON ONLY in this exact schema:
+{
+  "data": [
+    {
+      "id": 1,
+      "role": "...",
+      "originalText": "...",
+      "bbox1000": [ymin, xmin, ymax, xmax]
+    }
+  ]
+}
 `;
 
   // --- BRANCH 1: GOOGLE GENAI (GEMINI) ---
@@ -33,7 +91,7 @@ Strict rules:
     // Always use {apiKey: process.env.API_KEY} for initialization as per strict guidelines
     const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
 
-    const prompt = `Identify speakers and transcribe text from these manga pages using the cast description. Return as JSON.`;
+    const prompt = `Extract dialogue, roles, and coordinates from these manga pages. Return JSON matching the schema.`;
 
     const imageParts = images.map(img => ({
       inlineData: {
@@ -55,14 +113,24 @@ Strict rules:
           systemInstruction: systemInstruction,
           responseMimeType: "application/json",
           responseSchema: {
-            type: Type.ARRAY,
-            items: {
-              type: Type.OBJECT,
-              properties: {
-                role: { type: Type.STRING },
-                dialogue: { type: Type.STRING }
-              },
-              required: ['role', 'dialogue']
+            type: Type.OBJECT,
+            properties: {
+              data: {
+                type: Type.ARRAY,
+                items: {
+                  type: Type.OBJECT,
+                  properties: {
+                    id: { type: Type.INTEGER },
+                    role: { type: Type.STRING },
+                    originalText: { type: Type.STRING },
+                    bbox1000: {
+                      type: Type.ARRAY,
+                      items: { type: Type.INTEGER }
+                    }
+                  },
+                  required: ['id', 'role', 'originalText', 'bbox1000']
+                }
+              }
             }
           }
         }
@@ -71,7 +139,8 @@ Strict rules:
       const rawText = response.text;
       if (!rawText) throw new Error("Empty response from model");
       
-      const lines: DialogueLine[] = JSON.parse(rawText);
+      const parsed = JSON.parse(rawText);
+      const lines: DialogueLine[] = parsed.data || [];
       
       const usage = response.usageMetadata || {
         promptTokenCount: 0,
@@ -101,7 +170,7 @@ Strict rules:
 
     // Construct OpenAI-compatible message format
     const contentPayload: any[] = [
-      { type: "text", text: "Identify speakers and transcribe text. Return ONLY a raw JSON array." }
+      { type: "text", text: "Identify speakers, transcribe text, and extract coordinates. Return ONLY a raw JSON object with a 'data' array." }
     ];
 
     images.forEach(img => {
@@ -120,7 +189,6 @@ Strict rules:
 
     try {
       // Normalize Base URL
-      // If it's just the host (e.g. openrouter.ai/api/v1), ensure it ends with /chat/completions
       let url = settings.baseUrl;
       if (!url.includes('/chat/completions')) {
          url = url.replace(/\/+$/, '') + '/chat/completions';
@@ -131,7 +199,6 @@ Strict rules:
         headers: {
           'Content-Type': 'application/json',
           'Authorization': `Bearer ${settings.apiKey}`,
-          // OpenRouter specific headers
           'HTTP-Referer': typeof window !== 'undefined' ? window.location.origin : 'http://localhost',
           'X-Title': 'Manga Attribution Assistant'
         },
@@ -139,8 +206,6 @@ Strict rules:
           model: settings.modelId,
           messages: messages,
           temperature: 0.1,
-          // We removed response_format: { type: "json_object" } because openrouter/auto 
-          // might select a model that doesn't support it. We rely on system prompt.
         })
       });
 
@@ -154,14 +219,12 @@ Strict rules:
       
       if (!rawContent) throw new Error("Empty response from custom provider");
 
-      // Attempt to clean markdown code blocks if present (common with OpenRouter models)
       const cleanJson = rawContent.replace(/```json\n?|```/g, '').trim();
       
       let lines: DialogueLine[];
-      // Handle potential wrapping object like { "lines": [...] } or raw array
       try {
         const parsed = JSON.parse(cleanJson);
-        lines = Array.isArray(parsed) ? parsed : (parsed.lines || []);
+        lines = parsed.data || (Array.isArray(parsed) ? parsed : []);
       } catch (e) {
         console.error("Failed to parse JSON:", cleanJson);
         throw new Error("Failed to parse JSON response. The model might have returned unstructured text.");

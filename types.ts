@@ -6,8 +6,10 @@ export interface CastMember {
 }
 
 export interface DialogueLine {
+  id: number;
   role: string;
-  dialogue: string;
+  originalText: string;
+  bbox1000: number[]; // [ymin, xmin, ymax, xmax]
 }
 
 export interface AnalysisResult {

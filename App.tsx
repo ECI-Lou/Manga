@@ -186,8 +186,13 @@ const App: React.FC = () => {
     if (!result) return;
     try {
       const ws = XLSX.utils.json_to_sheet(result.lines.map((line: any) => ({
+        ID: line.id,
         Role: line.role,
-        Dialogue: line.dialogue
+        Text: line.originalText,
+        ymin: line.bbox1000?.[0],
+        xmin: line.bbox1000?.[1],
+        ymax: line.bbox1000?.[2],
+        xmax: line.bbox1000?.[3]
       })));
       const wb = XLSX.utils.book_new();
       XLSX.utils.book_append_sheet(wb, ws, "Transcription");
@@ -195,6 +200,25 @@ const App: React.FC = () => {
       addLog("Exported to Excel.", "success");
     } catch (err: any) {
       addLog(`Export failed: ${err.message}`, "error");
+    }
+  };
+
+  const downloadJSON = () => {
+    if (!result) return;
+    try {
+      const dataStr = JSON.stringify({ data: result.lines }, null, 2);
+      const blob = new Blob([dataStr], { type: "application/json" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = "manga_transcription.json";
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+      addLog("Exported to JSON.", "success");
+    } catch (err: any) {
+      addLog(`JSON Export failed: ${err.message}`, "error");
     }
   };
 
@@ -216,13 +240,22 @@ const App: React.FC = () => {
             </button>
           )}
           {result && (
-            <button 
-              onClick={downloadXLSX}
-              className="bg-green-600 hover:bg-green-700 text-white font-bold py-2 px-6 rounded-lg shadow-sm transition flex items-center gap-2 text-sm"
-            >
-              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"></path></svg>
-              Export XLSX
-            </button>
+            <div className="flex gap-2">
+              <button 
+                onClick={downloadJSON}
+                className="bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-2 px-4 rounded-lg shadow-sm transition flex items-center gap-2 text-sm"
+              >
+                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"></path></svg>
+                JSON
+              </button>
+              <button 
+                onClick={downloadXLSX}
+                className="bg-green-600 hover:bg-green-700 text-white font-bold py-2 px-4 rounded-lg shadow-sm transition flex items-center gap-2 text-sm"
+              >
+                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"></path></svg>
+                XLSX
+              </button>
+            </div>
           )}
         </div>
       </header>
@@ -419,16 +452,23 @@ const App: React.FC = () => {
                       key={idx} 
                       className="group flex gap-4 py-3 border-b border-gray-50 last:border-0 hover:bg-gray-50 px-3 rounded-lg transition"
                     >
-                      <div className="shrink-0 w-28 text-right">
+                      <div className="shrink-0 w-8 text-center pt-1">
+                        <span className="text-[10px] font-bold text-gray-300">#{line.id || idx + 1}</span>
+                      </div>
+                      <div className="shrink-0 w-24 text-right">
                          <span className={`font-black text-xs uppercase tracking-wide px-2 py-1 rounded-md ${
                           line.role === 'UNKNOWN' ? 'bg-gray-100 text-gray-500' : 
-                          line.role === 'SFX' ? 'bg-orange-100 text-orange-600' : 'bg-indigo-100 text-indigo-700'
+                          line.role === 'SFX' ? 'bg-orange-100 text-orange-600' : 
+                          line.role === 'NARRATION' ? 'bg-blue-100 text-blue-700' : 'bg-indigo-100 text-indigo-700'
                         }`}>
                           {line.role}
                         </span>
+                        <div className="mt-1 text-[9px] text-gray-400 font-mono">
+                           [{line.bbox1000?.join(', ')}]
+                        </div>
                       </div>
                       <div className="flex-1 text-gray-800 text-sm leading-relaxed whitespace-pre-wrap font-serif">
-                        {line.dialogue}
+                        {line.originalText}
                       </div>
                     </div>
                   ))
