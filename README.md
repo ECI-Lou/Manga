@@ -1,4 +1,4 @@
-# Manga Attribution Assistant (漫画台词角色分配助手)
+# Manga Attribution Assistant (漫画翻译助手)
 
 本项目是一个基于 AI 视觉大模型（VLM）的漫画台词识别与角色分配系统。它能够自动提取漫画书页中的对话框和旁白，识别文本内容，并根据用户配置的角色列表（Cast List）自动判断说话人，最后输出带有精确坐标（Bounding Box）的结构化数据。
 
