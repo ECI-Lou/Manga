@@ -2,12 +2,42 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { CastMember, AnalysisResult, LLMSettings } from './types';
 import { INITIAL_CAST } from './constants';
-import { analyzeMangaPages } from './services/geminiService';
+import { analyzeMangaPage } from './services/geminiService';
 import CastEditor from './components/CastEditor';
+
+const compressImage = (file: File, maxSize = 2048): Promise<string> => {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.readAsDataURL(file);
+    reader.onload = (event) => {
+      const img = new Image();
+      img.src = event.target?.result as string;
+      img.onload = () => {
+        const canvas = document.createElement('canvas');
+        let { width, height } = img;
+        if (width > height && width > maxSize) {
+          height *= maxSize / width;
+          width = maxSize;
+        } else if (height > maxSize) {
+          width *= maxSize / height;
+          height = maxSize;
+        }
+        canvas.width = width;
+        canvas.height = height;
+        const ctx = canvas.getContext('2d');
+        ctx?.drawImage(img, 0, 0, width, height);
+        resolve(canvas.toDataURL('image/jpeg', 0.8));
+      };
+      img.onerror = reject;
+    };
+    reader.onerror = reject;
+  });
+};
 import TokenDisplay from './components/TokenDisplay';
 
-// Global XLSX and AI Studio access
-declare var XLSX: any;
+import * as XLSX from 'xlsx';
+
+// Global AI Studio access
 declare var window: any;
 
 interface LogEntry {
@@ -22,6 +52,7 @@ const App: React.FC = () => {
   const [images, setImages] = useState<string[]>([]);
   const [result, setResult] = useState<AnalysisResult | null>(null);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
+  const [analyzeProgress, setAnalyzeProgress] = useState<{current: number, total: number} | null>(null);
   
   // Initialize with system ready message to ensure console isn't empty on load
   const [logs, setLogs] = useState<LogEntry[]>([{
@@ -106,13 +137,7 @@ const App: React.FC = () => {
     const fileArray = Array.from(files);
     addLog(`Processing ${fileArray.length} file(s)...`, 'info');
 
-    const readers = fileArray.map((file: File) => {
-      return new Promise<string>((resolve) => {
-        const reader = new FileReader();
-        reader.onload = (ev) => resolve(ev.target?.result as string);
-        reader.readAsDataURL(file);
-      });
-    });
+    const readers = fileArray.map((file: File) => compressImage(file));
 
     Promise.all(readers).then(results => {
       setImages(prev => [...prev, ...results]);
@@ -144,39 +169,65 @@ const App: React.FC = () => {
     setIsAnalyzing(true);
     setErrorState(null);
     setResult(null);
+    setAnalyzeProgress({ current: 0, total: images.length });
     
     // Setup new abort controller
     abortControllerRef.current = new AbortController();
     
-    addLog(`Initiating request to ${llmSettings.modelId}...`, 'info');
-
+    addLog(`Initiating analysis using ${llmSettings.modelId}...`, 'info');
     const startTime = performance.now();
+    
+    let totalUsage = { promptTokenCount: 0, candidatesTokenCount: 0, totalTokenCount: 0 };
+    let allLines: DialogueLine[] = [];
+    let hasErrors = false;
 
-    try {
-      const data = await analyzeMangaPages(images, cast, llmSettings);
-      const endTime = performance.now();
-      const duration = endTime - startTime;
-
-      setResult({
-        ...data,
-        executionTimeMs: duration
-      });
-
-      addLog(`Success! Used ${data.usage.totalTokenCount} tokens in ${(duration/1000).toFixed(2)}s.`, 'success');
-    } catch (err: any) {
-      if (err.name === 'AbortError' || err.message?.includes('abort')) {
-        // Logged already by stopAnalysis
-      } else {
+    for (let i = 0; i < images.length; i++) {
+      if (abortControllerRef.current?.signal.aborted) {
+        addLog("Analysis aborted by user.", "warn");
+        break;
+      }
+      
+      setAnalyzeProgress({ current: i + 1, total: images.length });
+      addLog(`Analyzing page ${i + 1} of ${images.length}...`, 'info');
+      
+      try {
+        const data = await analyzeMangaPage(images[i], cast, llmSettings);
+        const linesWithPage = data.lines.map(line => ({ ...line, pageIndex: i + 1 }));
+        allLines = [...allLines, ...linesWithPage];
+        
+        totalUsage.promptTokenCount += data.usage.promptTokenCount;
+        totalUsage.candidatesTokenCount += data.usage.candidatesTokenCount;
+        totalUsage.totalTokenCount += data.usage.totalTokenCount;
+        
+        addLog(`Page ${i + 1} analyzed successfully. Found ${data.lines.length} lines.`, 'success');
+      } catch (err: any) {
+        hasErrors = true;
         const errorMsg = err.message || 'Unknown analysis error';
-        addLog(`FAILED: ${errorMsg}`, 'error');
+        addLog(`FAILED on page ${i + 1}: ${errorMsg}`, 'error');
         if (errorMsg.includes('Requested entity was not found') && llmSettings.provider === 'google') {
           addLog("Possible API Key issue. Please re-select your key.", "warn");
+          break; // Stop further processing if it's an auth error
         }
       }
-    } finally {
-      setIsAnalyzing(false);
-      abortControllerRef.current = null;
     }
+
+    const endTime = performance.now();
+    const duration = endTime - startTime;
+
+    if (allLines.length > 0 || !hasErrors) {
+      setResult({
+        lines: allLines,
+        usage: totalUsage,
+        executionTimeMs: duration
+      });
+      addLog(`Analysis complete! Total tokens: ${totalUsage.totalTokenCount} in ${(duration/1000).toFixed(2)}s.`, 'success');
+    } else if (hasErrors && allLines.length === 0) {
+      setErrorState("Analysis failed for all pages. Check logs for details.");
+    }
+
+    setIsAnalyzing(false);
+    setAnalyzeProgress(null);
+    abortControllerRef.current = null;
   };
 
   // State just for a simple error message above results if needed
@@ -186,6 +237,7 @@ const App: React.FC = () => {
     if (!result) return;
     try {
       const ws = XLSX.utils.json_to_sheet(result.lines.map((line: any) => ({
+        Page: line.pageIndex || 1,
         ID: line.id,
         Role: line.role,
         Text: line.originalText,
@@ -436,7 +488,7 @@ const App: React.FC = () => {
                 ))}
                 <div className="absolute inset-x-0 bottom-0 p-8 bg-gradient-to-t from-white flex justify-center">
                   <div className="bg-indigo-50 text-indigo-700 text-xs px-4 py-2 rounded-full font-bold animate-bounce border border-indigo-100 shadow-sm">
-                    Reading manga pages...
+                    {analyzeProgress ? `Reading manga page ${analyzeProgress.current} of ${analyzeProgress.total}...` : 'Reading manga pages...'}
                   </div>
                 </div>
               </div>
@@ -452,8 +504,9 @@ const App: React.FC = () => {
                       key={idx} 
                       className="group flex gap-4 py-3 border-b border-gray-50 last:border-0 hover:bg-gray-50 px-3 rounded-lg transition"
                     >
-                      <div className="shrink-0 w-8 text-center pt-1">
+                      <div className="shrink-0 w-8 text-center pt-1 flex flex-col items-center">
                         <span className="text-[10px] font-bold text-gray-300">#{line.id || idx + 1}</span>
+                        {line.pageIndex && <span className="text-[9px] text-indigo-400 font-medium mt-1">P{line.pageIndex}</span>}
                       </div>
                       <div className="shrink-0 w-24 text-right">
                          <span className={`font-black text-xs uppercase tracking-wide px-2 py-1 rounded-md ${

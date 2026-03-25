@@ -2,8 +2,71 @@
 import { GoogleGenAI, Type } from "@google/genai";
 import { CastMember, AnalysisResult, DialogueLine, LLMSettings } from "../types";
 
-export const analyzeMangaPages = async (
-  images: string[], // Base64 strings
+function sortMangaLines(lines: DialogueLine[]): DialogueLine[] {
+  // 1. Sort by ymin to prepare for row grouping
+  lines.sort((a, b) => (a.bbox1000?.[0] || 0) - (b.bbox1000?.[0] || 0));
+
+  // 2. Group into panel rows
+  const groups: DialogueLine[][] = [];
+  let currentGroup: DialogueLine[] = [];
+  let currentYMax = -1;
+
+  for (const line of lines) {
+    if (!line.bbox1000) {
+      currentGroup.push(line);
+      continue;
+    }
+    const ymin = line.bbox1000[0];
+    const ymax = line.bbox1000[2];
+    
+    if (currentGroup.length === 0) {
+      currentGroup.push(line);
+      currentYMax = ymax;
+    } else {
+      // If the vertical gap is larger than 6% of the page (60/1000), it's a new panel row
+      if (ymin - currentYMax > 60) {
+        groups.push(currentGroup);
+        currentGroup = [line];
+        currentYMax = ymax;
+      } else {
+        currentGroup.push(line);
+        currentYMax = Math.max(currentYMax, ymax);
+      }
+    }
+  }
+  if (currentGroup.length > 0) {
+    groups.push(currentGroup);
+  }
+
+  // 3. Sort within each group and flatten
+  let sortedLines: DialogueLine[] = [];
+  for (const group of groups) {
+    group.sort((a, b) => {
+      if (!a.bbox1000 || !b.bbox1000) return 0;
+      const xOverlap = Math.max(0, Math.min(a.bbox1000[3], b.bbox1000[3]) - Math.max(a.bbox1000[1], b.bbox1000[1]));
+      const aWidth = a.bbox1000[3] - a.bbox1000[1];
+      const bWidth = b.bbox1000[3] - b.bbox1000[1];
+      
+      // If they overlap horizontally by > 50%, sort top-to-bottom
+      if (xOverlap > 0.5 * Math.min(aWidth, bWidth)) {
+        return a.bbox1000[0] - b.bbox1000[0];
+      }
+      // Otherwise, sort right-to-left
+      return b.bbox1000[3] - a.bbox1000[3];
+    });
+    sortedLines = sortedLines.concat(group);
+  }
+
+  // Reassign IDs after sorting
+  sortedLines.forEach((line, index) => {
+    line.id = index + 1;
+  });
+
+  return sortedLines;
+}
+
+export const analyzeMangaPage = async (
+  image: string, // Base64 string
   cast: CastMember[],
   settings: LLMSettings
 ): Promise<AnalysisResult> => {
@@ -17,7 +80,7 @@ Cast Reference:
 ${castDescription}
 
 Task:
-Extract ONLY dialogue balloons and narration/caption text from a manga page image.
+Extract ONLY dialogue balloons and narration/caption text from THIS manga page image.
 For each balloon/box, transcribe the text and output a normalized bounding box in [0..1000].
 Identify the speaker (role) using the Cast Reference.
 
@@ -57,13 +120,14 @@ Inclusion / exclusion:
 
 Transcription rules:
 - Preserve original language exactly and punctuation/symbols.
-- Preserve line breaks as displayed using "\\n".
+- Do NOT include line breaks ("\\n"). Combine multi-line text into a single continuous string.
 - Do NOT translate.
 
 Reading order & id:
 - Output in Japanese manga reading order:
-  1) top-to-bottom (smaller ymin first)
-  2) within the same row/band, right-to-left (larger xmax first)
+  1) Group balloons by panels (rows) from top to bottom.
+  2) Within each panel, order balloons from right to left.
+  3) If balloons are in the same vertical column within a panel, order them top to bottom.
 - Assign id starting from 1 after sorting.
 
 Attribution (Role):
@@ -88,17 +152,22 @@ Output format (STRICT):
 
   // --- BRANCH 1: GOOGLE GENAI (GEMINI) ---
   if (settings.provider === 'google') {
-    // Always use {apiKey: process.env.API_KEY} for initialization as per strict guidelines
-    const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+    // Compatible with both AI Studio environment and standard Vite environment
+    const apiKey = process.env.GEMINI_API_KEY || process.env.API_KEY || (import.meta as any).env?.VITE_GEMINI_API_KEY;
+    const ai = new GoogleGenAI({ apiKey: apiKey });
 
-    const prompt = `Extract dialogue, roles, and coordinates from these manga pages. Return JSON matching the schema.`;
+    const prompt = `Extract dialogue, roles, and coordinates from this manga page. Return JSON matching the schema.`;
 
-    const imageParts = images.map(img => ({
+    const mimeTypeMatch = image.match(/^data:(image\/[a-zA-Z+]+);base64,/);
+    const mimeType = mimeTypeMatch ? mimeTypeMatch[1] : 'image/jpeg';
+    const base64Data = image.replace(/^data:image\/[a-zA-Z+]+;base64,/, '');
+
+    const imageParts = [{
       inlineData: {
-        mimeType: 'image/png',
-        data: img.split(',')[1] || img
+        mimeType: mimeType,
+        data: base64Data
       }
-    }));
+    }];
 
     try {
       const response = await ai.models.generateContent({
@@ -140,7 +209,15 @@ Output format (STRICT):
       if (!rawText) throw new Error("Empty response from model");
       
       const parsed = JSON.parse(rawText);
-      const lines: DialogueLine[] = parsed.data || [];
+      let lines: DialogueLine[] = parsed.data || [];
+      
+      // Post-processing: Remove newlines and enforce manga sorting (Right-to-Left, Top-to-Bottom)
+      lines = lines.map(line => ({
+        ...line,
+        originalText: line.originalText ? line.originalText.replace(/\n/g, '').trim() : ''
+      }));
+
+      lines = sortMangaLines(lines);
       
       const usage = response.usageMetadata || {
         promptTokenCount: 0,
@@ -170,17 +247,14 @@ Output format (STRICT):
 
     // Construct OpenAI-compatible message format
     const contentPayload: any[] = [
-      { type: "text", text: "Identify speakers, transcribe text, and extract coordinates. Return ONLY a raw JSON object with a 'data' array." }
-    ];
-
-    images.forEach(img => {
-      contentPayload.push({
+      { type: "text", text: "Identify speakers, transcribe text, and extract coordinates. Return ONLY a raw JSON object with a 'data' array." },
+      {
         type: "image_url",
         image_url: {
-          url: img // OpenRouter/OpenAI expects data URI
+          url: image // OpenRouter/OpenAI expects data URI
         }
-      });
-    });
+      }
+    ];
 
     const messages = [
       { role: "system", content: systemInstruction },
@@ -225,6 +299,14 @@ Output format (STRICT):
       try {
         const parsed = JSON.parse(cleanJson);
         lines = parsed.data || (Array.isArray(parsed) ? parsed : []);
+        
+        // Post-processing: Remove newlines and enforce manga sorting (Right-to-Left, Top-to-Bottom)
+        lines = lines.map(line => ({
+          ...line,
+          originalText: line.originalText ? line.originalText.replace(/\n/g, '').trim() : ''
+        }));
+
+        lines = sortMangaLines(lines);
       } catch (e) {
         console.error("Failed to parse JSON:", cleanJson);
         throw new Error("Failed to parse JSON response. The model might have returned unstructured text.");

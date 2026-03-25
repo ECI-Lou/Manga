@@ -7,6 +7,7 @@ export interface CastMember {
 
 export interface DialogueLine {
   id: number;
+  pageIndex?: number;
   role: string;
   originalText: string;
   bbox1000: number[]; // [ymin, xmin, ymax, xmax]
