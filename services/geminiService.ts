@@ -2,6 +2,25 @@
 import { GoogleGenAI, Type } from "@google/genai";
 import { CastMember, AnalysisResult, DialogueLine, LLMSettings } from "../types";
 
+function extractJSON(text: string): any {
+  // Try to find the first '{' and last '}'
+  const start = text.indexOf('{');
+  const end = text.lastIndexOf('}');
+  
+  if (start !== -1 && end !== -1 && end > start) {
+    const jsonStr = text.substring(start, end + 1);
+    try {
+      return JSON.parse(jsonStr);
+    } catch (e) {
+      // If direct parsing fails, fallback to regex cleanup
+    }
+  }
+  
+  // Fallback: strip markdown blocks
+  const clean = text.replace(/```json\n?|```/g, '').trim();
+  return JSON.parse(clean);
+}
+
 function sortMangaLines(lines: DialogueLine[]): DialogueLine[] {
   // 1. Sort by ymin to prepare for row grouping
   lines.sort((a, b) => (a.bbox1000?.[0] || 0) - (b.bbox1000?.[0] || 0));
@@ -208,7 +227,14 @@ Output format (STRICT):
       const rawText = response.text;
       if (!rawText) throw new Error("Empty response from model");
       
-      const parsed = JSON.parse(rawText);
+      let parsed;
+      try {
+        parsed = extractJSON(rawText);
+      } catch (e) {
+        console.error("Failed to parse JSON:", rawText);
+        throw new Error("Failed to parse JSON response. The model might have returned unstructured text.");
+      }
+      
       let lines: DialogueLine[] = parsed.data || [];
       
       // Post-processing: Remove newlines and enforce manga sorting (Right-to-Left, Top-to-Bottom)
@@ -293,11 +319,9 @@ Output format (STRICT):
       
       if (!rawContent) throw new Error("Empty response from custom provider");
 
-      const cleanJson = rawContent.replace(/```json\n?|```/g, '').trim();
-      
       let lines: DialogueLine[];
       try {
-        const parsed = JSON.parse(cleanJson);
+        const parsed = extractJSON(rawContent);
         lines = parsed.data || (Array.isArray(parsed) ? parsed : []);
         
         // Post-processing: Remove newlines and enforce manga sorting (Right-to-Left, Top-to-Bottom)
@@ -308,7 +332,7 @@ Output format (STRICT):
 
         lines = sortMangaLines(lines);
       } catch (e) {
-        console.error("Failed to parse JSON:", cleanJson);
+        console.error("Failed to parse JSON:", rawContent);
         throw new Error("Failed to parse JSON response. The model might have returned unstructured text.");
       }
 

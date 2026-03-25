@@ -47,9 +47,14 @@ interface LogEntry {
   message: string;
 }
 
+interface MangaImage {
+  id: string;
+  url: string;
+}
+
 const App: React.FC = () => {
   const [cast, setCast] = useState<CastMember[]>(INITIAL_CAST);
-  const [images, setImages] = useState<string[]>([]);
+  const [images, setImages] = useState<MangaImage[]>([]);
   const [result, setResult] = useState<AnalysisResult | null>(null);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [analyzeProgress, setAnalyzeProgress] = useState<{current: number, total: number} | null>(null);
@@ -63,12 +68,24 @@ const App: React.FC = () => {
   }]);
   
   // Model Configuration State
-  const [llmSettings, setLlmSettings] = useState<LLMSettings>({
-    provider: 'google',
-    modelId: 'gemini-3-flash-preview',
-    baseUrl: 'https://openrouter.ai/api/v1',
-    apiKey: ''
+  const [llmSettings, setLlmSettings] = useState<LLMSettings>(() => {
+    const saved = localStorage.getItem('manga_llm_settings');
+    if (saved) {
+      try {
+        return JSON.parse(saved);
+      } catch (e) {}
+    }
+    return {
+      provider: 'google',
+      modelId: 'gemini-3-flash-preview',
+      baseUrl: 'https://openrouter.ai/api/v1',
+      apiKey: ''
+    };
   });
+
+  useEffect(() => {
+    localStorage.setItem('manga_llm_settings', JSON.stringify(llmSettings));
+  }, [llmSettings]);
   
   // Ref to track the current abort controller for the active request
   const abortControllerRef = useRef<AbortController | null>(null);
@@ -80,7 +97,7 @@ const App: React.FC = () => {
       type,
       message
     };
-    setLogs(prev => [entry, ...prev].slice(100));
+    setLogs(prev => [entry, ...prev].slice(0, 100));
   }, []);
 
   const handleProviderChange = (e: React.ChangeEvent<HTMLSelectElement>) => {
@@ -140,14 +157,18 @@ const App: React.FC = () => {
     const readers = fileArray.map((file: File) => compressImage(file));
 
     Promise.all(readers).then(results => {
-      setImages(prev => [...prev, ...results]);
+      const newImages = results.map(url => ({
+        id: crypto.randomUUID(),
+        url
+      }));
+      setImages(prev => [...prev, ...newImages]);
       setResult(null);
       addLog(`Added ${results.length} new image(s). Total: ${images.length + results.length}`, 'success');
     });
   };
 
-  const removeImage = (index: number) => {
-    setImages(prev => prev.filter((_, i) => i !== index));
+  const removeImage = (idToRemove: string) => {
+    setImages(prev => prev.filter(img => img.id !== idToRemove));
     addLog("Removed image from selection.", "info");
   };
 
@@ -191,7 +212,7 @@ const App: React.FC = () => {
       addLog(`Analyzing page ${i + 1} of ${images.length}...`, 'info');
       
       try {
-        const data = await analyzeMangaPage(images[i], cast, llmSettings);
+        const data = await analyzeMangaPage(images[i].url, cast, llmSettings);
         const linesWithPage = data.lines.map(line => ({ ...line, pageIndex: i + 1 }));
         allLines = [...allLines, ...linesWithPage];
         
@@ -434,10 +455,10 @@ const App: React.FC = () => {
             {images.length > 0 ? (
               <div className="flex-1 overflow-y-auto pr-1 scrollbar-thin scrollbar-thumb-gray-200 space-y-4">
                 {images.map((img, idx) => (
-                  <div key={idx} className="relative group rounded-lg overflow-hidden border border-gray-200 shadow-sm">
-                    <img src={img} className="w-full h-auto object-cover" alt={`Page ${idx+1}`} />
+                  <div key={img.id} className="relative group rounded-lg overflow-hidden border border-gray-200 shadow-sm">
+                    <img src={img.url} className="w-full h-auto object-cover" alt={`Page ${idx+1}`} />
                     <button 
-                      onClick={() => removeImage(idx)}
+                      onClick={() => removeImage(img.id)}
                       disabled={isAnalyzing}
                       className="absolute top-2 right-2 bg-red-600 text-white rounded-full w-6 h-6 flex items-center justify-center opacity-0 group-hover:opacity-100 transition shadow-md hover:bg-red-700 z-10"
                       title="Remove image"
